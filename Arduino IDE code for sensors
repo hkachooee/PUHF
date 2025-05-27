@@ -1,0 +1,109 @@
+#include <OneWire.h> //library for wiring 
+#include <DallasTemperature.h> //library for temperature porbe 
+#include <DHT.h> //library for the temp/hum sensor 
+
+#define DHTPIN 4      // room temp/humidity pin 4
+#define DHTTYPE DHT11 // model type 
+#define TDS_PIN A1           // TDS sensor on pin A1
+#define ONE_WIRE_BUS 2       // DS18B20 data line to digital pin D2
+//#define RELAY_PIN 7
+
+DHT dht(DHTPIN, DHTTYPE);
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature sensors(&oneWire);
+
+//thresholds for sensors 
+
+const int tdslow = 300; //in ppm, need to adjust
+const int tdshigh = 800; //same as above 
+
+const int highwatertemp = 60;
+const int lowwatertemp = 10; 
+
+const int lowroomtemp = 20;
+const int highroomtemp = 50; //in c, change lol
+
+const int toohumid = 70;
+const int toodry = 10;
+
+//start readings 
+void setup() {
+  Serial.begin(9600);
+  dht.begin(); //begin reading temperature 
+  sensors.begin(); // Start the sensor
+
+ // pinMode(RELAY_PIN, OUTPUT);
+  //digitalWrite(RELAY_PIN, LOW);
+}
+
+void loop() {
+  float tdsValue = analogRead(TDS_PIN); //read value from the assigned pin 
+  float ecValue = 12.8621 * tdsValue - 986.99; //reads in microsemens from labquest
+
+  // Read temperature
+  sensors.requestTemperatures(); 
+  float waterTemp = sensors.getTempCByIndex(0); // Get temp in °C, initialized to 0 
+
+  // Read room temperature and humidity
+  float h = dht.readHumidity(); //float value from the dht itself 
+  float t = dht.readTemperature(); // value from dht 
+
+//error message for irregular water temperature  
+
+  // Check if reads failed
+  if (isnan(h) || isnan(t)) { //if no signal for humidity and/or temp 
+    Serial.println("Failed to read from DHT sensor!"); //print error 
+  } else { // if that doesn't apply
+    if (h >= toohumid) Serial.println("Room is too humid");
+    if (h <= toodry) Serial.println("Room is too dry");
+    if (t >= highroomtemp ) Serial.println("Room is too hot!"); 
+    if (t <= lowroomtemp ) Serial.println("Room is too cold!"); 
+  }
+
+if (waterTemp == -127.0){
+    Serial.println("Failed to reac from water sensor, check connection");
+}else {
+  if (waterTemp <= lowwatertemp) Serial.println("Reservoir water is too cold!");
+  if (waterTemp >= highwatertemp) Serial.println("Reservoir water is too hot!"); 
+}
+//perisletic pump logic 
+/*
+if (tdsValue < tdslow){
+  digitalWrite(RELAY_PIN, HIGH); //turn on the pump 
+  Serial.println("TDS too low, turning on pump");
+}else {
+  digitalWrite(RELAY_PIN, LOW);
+  Serial.println("TDS value is normal");
+}
+if (tdsValue > tdshigh){
+  Serial.println("TDS too high, add more water");//ask them to add more water?
+}else {
+  digitalWrite(RELAY_PIN, LOW);
+  Serial.println("TDS value is normal");
+}
+*/ 
+
+  // Display sensor values output 
+  Serial.println ("========= Sensor Values =========");
+
+  Serial.print("TDS Raw Value: "); //keep it as ppm?
+  Serial.println(tdsValue); //print the value, later transferred to pi
+
+  Serial.print("Conductivity in μS/cm: ");
+  Serial.println(ecValue);
+  
+  Serial.print("Water Temperature: "); //print water temp
+  Serial.print(waterTemp); //read in value from sensor
+  Serial.println(" °C"); //keep in c
+
+
+  Serial.print("Room Temperature: "); //text for temp
+  Serial.print(t); //value 
+  Serial.println(" °C"); //text for c 
+  Serial.print("Humidity: "); //text for humidity 
+  Serial.print(h); //print value 
+  Serial.println(" %"); //put in %
+
+    const unsigned long delaytime = 300000;
+    delay(delaytime); // Read every x seconds? 
+}
