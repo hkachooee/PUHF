@@ -1,109 +1,177 @@
-#include <OneWire.h> //library for wiring 
-#include <DallasTemperature.h> //library for temperature porbe 
-#include <DHT.h> //library for the temp/hum sensor 
+//libraries, may need more for ph, pump, and float sensor 
+#include <OneWire.h>               
+#include <DallasTemperature.h>    
+#include <DHT.h>                   
+#include <WiFi.h>
+#include <PubSubClient.h>
+#include <cmath>
 
-#define DHTPIN 4      // room temp/humidity pin 4
-#define DHTTYPE DHT11 // model type 
-#define TDS_PIN A1           // TDS sensor on pin A1
-#define ONE_WIRE_BUS 2       // DS18B20 data line to digital pin D2
-//#define RELAY_PIN 7
+//network setup through pi
+const char* ssid = "PUHFHUB";
+const char* password = "PUHF200!";
+const char* mqtt_server = "192.168.4.1";
+WiFiClient espClient;
+PubSubClient client(espClient);
 
+//pin locations, change to ESP32 pins!
+#define DHTPIN 4                 // DHT11 pin
+#define DHTTYPE DHT11             // DHT11 sensor type                
+#define ONE_WIRE_BUS 15            // DS18B20 pin
+#define TDS_PIN 34
+#define PH_PIN 35
+#define FLOAT_PIN 27
+
+// sensor objects
 DHT dht(DHTPIN, DHTTYPE);
 OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature sensors(&oneWire);
 
-//thresholds for sensors 
+// calibration, done with my probe and TDS EZ by HM Digital sensor
+// my sensor = 365.5 ppm vs real = 324 ppm (tap water)
+// my sensor = 1422.48 ppm vs real = 2950 ppm (salt water, random amount)
+//do one with lab quest, replace EZ?
+// standard formula is EC * 0.64 = ppm so we reverse into ppm / 0.64
+const float ecRef1 = 324.0 / 0.64;     // µS/cm  for tap
+const float ecRef2 = 2950.0 / 0.64;    // µS/cm for salt water
+const float yourEc1 = 365.5 / 0.64;    // µS/cm
+const float yourEc2 = 1422.48 / 0.64;  // µS/cm
+const float ecSlope  = (ecRef2 - ecRef1) / (yourEc2 - yourEc1);
+const float ecoffset = ecRef1 - ecSlope * yourEc1;
 
-const int tdslow = 300; //in ppm, need to adjust
-const int tdshigh = 800; //same as above 
+//calibrations for ph between 4 and 7?
+//change voltage later 
+const float phLow = 2;
+const float phHigh = 7;
+const float voltageLow = 1.0879;
+const float voltageHigh = 1.7947;
+const float phSlope = (phHigh - phLow) / (voltageHigh - voltageLow);
+const float phIntercept = phLow - phSlope * voltageLow;
 
-const int highwatertemp = 60;
-const int lowwatertemp = 10; 
-
+// for notifications, may need to change 
+const int tdslow = 300;           // µS/cm
+const int tdshigh = 800;          // µS/cm
+const int highwatertemp = 60;     // °C
+const int lowwatertemp = 10;
 const int lowroomtemp = 20;
-const int highroomtemp = 50; //in c, change lol
-
+const int highroomtemp = 50;
 const int toohumid = 70;
 const int toodry = 10;
 
-//start readings 
-void setup() {
-  Serial.begin(9600);
-  dht.begin(); //begin reading temperature 
-  sensors.begin(); // Start the sensor
+void reconnect(){ //reconnection loop for mqtt
+  while (!client.connected()){
+    Serial.print("Attempting MQTT connection...");
+    if (client.connect("ESP32Client")){
+      Serial.println("connected");
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(client.state());
+      delay(2000);
+    }
+  }
+}
 
- // pinMode(RELAY_PIN, OUTPUT);
-  //digitalWrite(RELAY_PIN, LOW);
+void setup() {
+  //start sensor reads
+  Serial.begin(9600);
+  dht.begin();           
+  sensors.begin();  
+  pinMode(FLOAT_PIN, INPUT_PULLUP);
+  
+  //pump pins, all turned off first
+  pinMode(25, OUTPUT);
+  pinMode(26, OUTPUT);
+  digitalWrite(25, LOW);
+  digitalWrite(26, LOW);
+
+  // connect to wifi
+  WiFi.begin(ssid, password);
+  Serial.print("Connecting to WiFi...");
+  while (WiFi.status() != WL_CONNECTED){
+    delay(1000);
+    Serial.print(".");
+  }
+  Serial.println("WiFi Connected");
+  Serial.println(WiFi.localIP());
+
+  //connect to mosquitto with pi
+  client.setServer(mqtt_server, 1883);
+  reconnect();
 }
 
 void loop() {
-  float tdsValue = analogRead(TDS_PIN); //read value from the assigned pin 
-  float ecValue = 12.8621 * tdsValue - 986.99; //reads in microsemens from labquest
+  if (!client.connected()) reconnect(); //if not connected to mqtt, reconnect loop
+  client.loop(); //active client 
 
-  // Read temperature
-  sensors.requestTemperatures(); 
-  float waterTemp = sensors.getTempCByIndex(0); // Get temp in °C, initialized to 0 
+  // water temp
+  sensors.requestTemperatures();
+  float waterTemp = sensors.getTempCByIndex(0);
 
-  // Read room temperature and humidity
-  float h = dht.readHumidity(); //float value from the dht itself 
-  float t = dht.readTemperature(); // value from dht 
-
-//error message for irregular water temperature  
-
-  // Check if reads failed
-  if (isnan(h) || isnan(t)) { //if no signal for humidity and/or temp 
-    Serial.println("Failed to read from DHT sensor!"); //print error 
-  } else { // if that doesn't apply
-    if (h >= toohumid) Serial.println("Room is too humid");
-    if (h <= toodry) Serial.println("Room is too dry");
-    if (t >= highroomtemp ) Serial.println("Room is too hot!"); 
-    if (t <= lowroomtemp ) Serial.println("Room is too cold!"); 
-  }
-
-if (waterTemp == -127.0){
-    Serial.println("Failed to reac from water sensor, check connection");
-}else {
-  if (waterTemp <= lowwatertemp) Serial.println("Reservoir water is too cold!");
-  if (waterTemp >= highwatertemp) Serial.println("Reservoir water is too hot!"); 
-}
-//perisletic pump logic 
-/*
-if (tdsValue < tdslow){
-  digitalWrite(RELAY_PIN, HIGH); //turn on the pump 
-  Serial.println("TDS too low, turning on pump");
-}else {
-  digitalWrite(RELAY_PIN, LOW);
-  Serial.println("TDS value is normal");
-}
-if (tdsValue > tdshigh){
-  Serial.println("TDS too high, add more water");//ask them to add more water?
-}else {
-  digitalWrite(RELAY_PIN, LOW);
-  Serial.println("TDS value is normal");
-}
-*/ 
-
-  // Display sensor values output 
-  Serial.println ("========= Sensor Values =========");
-
-  Serial.print("TDS Raw Value: "); //keep it as ppm?
-  Serial.println(tdsValue); //print the value, later transferred to pi
-
-  Serial.print("Conductivity in μS/cm: ");
-  Serial.println(ecValue);
+  // room conditions
+  float h = dht.readHumidity();
+  float t = dht.readTemperature();
   
-  Serial.print("Water Temperature: "); //print water temp
-  Serial.print(waterTemp); //read in value from sensor
-  Serial.println(" °C"); //keep in c
+  //float sens
+  int floatstate = digitalRead(FLOAT_PIN);
 
+  //voltage calculations for Ec
+  int tdsRaw = analogRead(TDS_PIN);
+  float tdsVoltage = tdsRaw * (3.3 / 4095.0); //ESP32 is 3.3v and the max range is 4095
+  float tempCoefficient = 1.0 + 0.02 * (waterTemp - 25.0); //from manufacturer's website 
+  //from gravity TDS sensor documentation, rawEc = rawEC / tempCoefficient 
+  float rawEc = (133.42 * pow(tdsVoltage, 3)) - (255.86 * pow(tdsVoltage, 2)) + (857.39 * tdsVoltage);
+  rawEc = rawEc / tempCoefficient;  //fmax(a,b) returns larger of a and b. floating point of max(()). we put 0 to avoid negative readings!
+  float calibratedEc = fmax(ecSlope * rawEc + ecoffset, 0);
 
-  Serial.print("Room Temperature: "); //text for temp
-  Serial.print(t); //value 
-  Serial.println(" °C"); //text for c 
-  Serial.print("Humidity: "); //text for humidity 
-  Serial.print(h); //print value 
-  Serial.println(" %"); //put in %
+  //voltage calculations for pH
+  int phRaw = analogRead(PH_PIN);
+  float phVoltage = phRaw * (3.3 / 4095);
+  //float clampedVoltage = constrain(phVoltage, voltageLow, voltageHigh);
+  //float ph = phSlope * clampedVoltage + phIntercept;
+  float ph = exp((phVoltage - 0.322) / 0.742);
 
-    const unsigned long delaytime = 300000;
-    delay(delaytime); // Read every x seconds? 
+//calibrtion prints, can remove when done or comment out i guess
+  Serial.print("TDS Raw in ppm: "); Serial.print(tdsRaw);
+  Serial.print("TDS Voltage: "); Serial.print(tdsVoltage, 4);
+  Serial.print("EC Raw: "); Serial.print(rawEc, 2);
+  Serial.print("Calibrated Ec: "); Serial.println(calibratedEc, 2);
+
+  Serial.print("pH raw: "); Serial.print(phRaw);
+  Serial.print("ph voltage: "); Serial.print(phVoltage, 4);
+  Serial.print("final ph: "); Serial.println(ph, 2);
+
+  //live sensor reads publish payloads 
+  String payload = "{";
+  payload += "\"room_temp\":" + String(t) + ",";
+  payload += "\"humidity\":" + String(h) + ",";
+  payload += "\"water_temp\":" + String(waterTemp) + ",";
+  ///one decimal place?
+  payload += "\"ec\":" + String(calibratedEc, 1) + ",";
+  ///two decimal place?
+  payload += "\"ph\":" + String(ph, 2) + ",";
+  payload += "\"low_water\":" + String(floatstate == LOW ? 1 : 0);
+  payload += "}";
+  client.publish("sensors/all", payload.c_str());
+
+  // erros config
+  if (h >= toohumid) client.publish("alerts/humidity", "Room is too humid!");
+  if (h <= toodry) client.publish("alerts/humidity", "Room is too humid!");
+  if (t >= highroomtemp) client.publish("alerts/room_temp", "Room is too hot!");
+  if (t <= lowroomtemp) client.publish("alerts/room_temp", "Room is too cold!");
+  if (waterTemp <= lowwatertemp) client.publish("alerts/water_temp", "Reservoir is too cold!");
+  if (waterTemp >= highwatertemp) client.publish("alerts/water_temp", "Reservoir is too hot!");
+  if (floatstate == LOW) client.publish("alerts/water_level", "Water level is LOW!");
+
+  //pump, use gpio directly 
+  if (calibratedEc < tdslow){
+    digitalWrite(25, HIGH);
+    digitalWrite(26, LOW);
+    client.publish("alerts/pump", "Nutrients too low, pump on");
+  }else{
+    digitalWrite(25, LOW);
+    digitalWrite(26, LOW);
+  }
+  
+  // prints, for serial monnitor - prototype only 
+  Serial.println(payload);
+  delay(5000);
 }
