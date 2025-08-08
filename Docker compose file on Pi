@@ -1,0 +1,39 @@
+GNU nano 7.2
+version: "3.7"
+
+services:
+  grafana:
+    image: grafana/grafana-oss 
+    container_name: grafana 
+    restart: unless-stopped 
+    ports:
+      - "3000:3000"
+environment:
+    - GF_SECURITY_ADMIN_USER=xyz
+    - GF_SECURITY_ADMIN_PASSWORD=xyz
+
+telegraf: 
+  image: telegraf
+  container_name: telegraf
+  restart: unless-stopped
+  volumes:
+      - volumedirect
+
+influxdb:
+  image: influxdb:2.7
+  container_name: influxdb
+  restart: unless-stopped
+  ports:
+    - "8086:8086"
+volumes:
+    - influxdb-data:/var/lib/influxdb2
+environment:
+- DOCKER_INFLUXDB_INIT_MODE=setup
+- DOCKER_INFLUXDB_INIT_USERNAME=user
+- DOCKER_INFLUXDB_INIT_PASSWORD=pass
+- DOCKER_INFLUXDB_INIT_ORG="org name"
+- DOCKER_INFLUXDB_INIT_BUCKET=bucketname
+- DOCKER_INFLUXDB_INIT_ADMIN_TOKEN= *yourtoken*
+
+volumes: 
+  influxdb-data:
