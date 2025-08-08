@@ -1,0 +1,38 @@
+# Global agent settings
+[agent]
+interval = "10s"
+round_interval = true
+debug = false
+quiet = false
+hostname = "myhostname"
+flush_interval = "10s"
+flush_jitter = "5s"
+
+# INPUT PLUGINS 
+# MQTT consumer that reads, JSON and parses
+[[inputs.mqtt_consumer]]
+  servers = ["tcp://myip:1883"] #MQTT broker (on Pi)
+  topics = ["sensors/all"] # Topic published ESP32
+  qos = 0 
+  connection_timeout = "30s"
+  client_id = "telegraf-mqtt-consumer"
+  
+  data_format = "json" # Parse message as JSON
+  name_override = "airSensors" # Sets _measurement = "airSensors"
+
+# OUTPUT PLUGINS
+# Output to InfluxDB v2 (Local)
+[[outputs.influxdb_v2]]
+  urls = ["http://myip:8086"]
+  token = "mytoken"
+  organization = "mylocalid"
+  bucket = "mybucketname"
+  timeout = "5s"
+
+# Output to InfluxDB v2 (Cloud)
+[[outputs.influxdb_v2]]
+urls = ["https://mycloudurl.influxdata.com"]
+token ="mycloudid"
+organization = "myid"
+bucket = "mybucket"
+timeout = "5s"
