@@ -1,0 +1,46 @@
+GNU nano 7.2 
+default_config:
+
+mqtt:
+  sensor:
+    - name: "Water Temperature"
+      state_topic: "sensors/all" unit_of_measurement: "C"
+      value_template: "{{ value_json.water_temp | float }}" 
+      unique_id: water_temp_sensor
+
+    - name: "Water pH"
+      state_topic: "sensors/all"
+      unit_of_measurement: "pH"
+      value_template: "{{ value_json.ph | float }}"
+      unique_id: water_ph_sensor
+
+    - name: "Water EC"
+      state_topic: "sensors/all"
+      unit_of_measurement: "microsemens/cm"
+      value_template: "{{ value_json.ec | float }}"
+      unique_id: water_ec_sensor
+
+    - name: "Room Temperature"
+      state_topic: "sensors/all"
+      unit_of_measurement: "C"
+      value_template: "{{ value_json.room_temp | float }}" 
+      unique_id: room_temp_sensor
+
+    - name: "Humidity"
+      state_topic: "sensors/all"
+      unit_of_measurement: "%"
+      value_template: "{{ value_json.humidity | float }}" 
+      unique_id: room_humidity_sensor
+
+    - name: "Low Water Detected"
+      state_topic: "sensors/all"
+      value_template: "{{ value_json.low_water | int }}"
+      device_class: moisture
+      unique_id: water_float_sensor
+
+binary_sensor:
+
+    - name: "Float Sensor (Low Water)"
+      state_topic: "sensors/all"
+      value_template: "{{ 'ON' if value_json.low_water == 1 else 'OFF' }}" 
+      device_class: moisture
