@@ -1,4 +1,9 @@
-//libraries, may need more for ph, pump, and float sensor 
+/*update 7/25: added median filtering with bubble sort for a more stable voltage input for the ph and tds sensors 
+added condition for sensor readins = nan and/or inf, all should be numeric or else data cant parse to servers 
+https://wiki.dfrobot.com/Gravity__Analog_TDS_Sensor___Meter_For_Arduino_SKU__SEN0244?utm_source=chatgpt.com
+*/
+
+//libraries
 #include <OneWire.h>               
 #include <DallasTemperature.h>    
 #include <DHT.h>                   
@@ -13,10 +18,15 @@ const char* mqtt_server = "192.168.4.1";
 WiFiClient espClient;
 PubSubClient client(espClient);
 
-//pin locations, change to ESP32 pins!
-#define DHTPIN 4                 // DHT11 pin
-#define DHTTYPE DHT11             // DHT11 sensor type                
-#define ONE_WIRE_BUS 15            // DS18B20 pin
+//pump timing. max 1 min
+unsigned long pumpstarttime = 0; 
+bool pumprunning = false; 
+const unsigned long maxpumptime = 30000; 
+
+//pin locations
+#define DHTPIN 33                 
+#define DHTTYPE DHT11                           
+#define ONE_WIRE_BUS 15            
 #define TDS_PIN 34
 #define PH_PIN 35
 #define FLOAT_PIN 27
@@ -26,38 +36,23 @@ DHT dht(DHTPIN, DHTTYPE);
 OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature sensors(&oneWire);
 
-// calibration, done with my probe and TDS EZ by HM Digital sensor
-// my sensor = 365.5 ppm vs real = 324 ppm (tap water)
-// my sensor = 1422.48 ppm vs real = 2950 ppm (salt water, random amount)
-//do one with lab quest, replace EZ?
-// standard formula is EC * 0.64 = ppm so we reverse into ppm / 0.64
-const float ecRef1 = 324.0 / 0.64;     // µS/cm  for tap
-const float ecRef2 = 2950.0 / 0.64;    // µS/cm for salt water
-const float yourEc1 = 365.5 / 0.64;    // µS/cm
-const float yourEc2 = 1422.48 / 0.64;  // µS/cm
-const float ecSlope  = (ecRef2 - ecRef1) / (yourEc2 - yourEc1);
-const float ecoffset = ecRef1 - ecSlope * yourEc1;
+// for pump, will have to change to ppm later
+const int tdslow = 1500;           // µS/cm
+const int tdshigh = 4000;          // µS/cm
 
-//calibrations for ph between 4 and 7?
-//change voltage later 
-const float phLow = 2;
-const float phHigh = 7;
-const float voltageLow = 1.0879;
-const float voltageHigh = 1.7947;
-const float phSlope = (phHigh - phLow) / (voltageHigh - voltageLow);
-const float phIntercept = phLow - phSlope * voltageLow;
+//median filter setup with arrays
+#define SCOUNT 30
 
-// for notifications, may need to change 
-const int tdslow = 300;           // µS/cm
-const int tdshigh = 800;          // µS/cm
-const int highwatertemp = 60;     // °C
-const int lowwatertemp = 10;
-const int lowroomtemp = 20;
-const int highroomtemp = 50;
-const int toohumid = 70;
-const int toodry = 10;
+int phBuffer[SCOUNT];
+int phBufferTemp[SCOUNT];
+int phBufferIndex = 0;
 
-void reconnect(){ //reconnection loop for mqtt
+int tdsBuffer[SCOUNT];
+int tdsBufferTemp[SCOUNT];
+int tdsBufferIndex = 0;
+
+//reconnection loop for mqtt
+void reconnect(){ 
   while (!client.connected()){
     Serial.print("Attempting MQTT connection...");
     if (client.connect("ESP32Client")){
@@ -70,13 +65,24 @@ void reconnect(){ //reconnection loop for mqtt
   }
 }
 
+int getMedian(int arr[], int len); 
+
 void setup() {
+  //force the pump off until i figure out tds lol
+  pinMode(25, OUTPUT);
+  pinMode(26, OUTPUT);
+  digitalWrite(25, LOW);
+  digitalWrite(26, LOW);
   //start sensor reads
   Serial.begin(9600);
   dht.begin();           
   sensors.begin();  
   pinMode(FLOAT_PIN, INPUT_PULLUP);
-  
+
+  //voltage readings for analogs
+  analogReadResolution(12); // 12-bit Espressif official docs
+  analogSetAttenuation(ADC_11db); // allows full-scale voltage up from Espressif official docs
+
   //pump pins, all turned off first
   pinMode(25, OUTPUT);
   pinMode(26, OUTPUT);
@@ -105,73 +111,114 @@ void loop() {
   // water temp
   sensors.requestTemperatures();
   float waterTemp = sensors.getTempCByIndex(0);
+  if (isnan(waterTemp) || isinf (waterTemp)) waterTemp = 0.0;
 
   // room conditions
-  float h = dht.readHumidity();
-  float t = dht.readTemperature();
-  
+  float humidity = dht.readHumidity();
+  if (isnan(humidity) || isinf (humidity)) humidity = 0.0;
+
+
+  float temperature = dht.readTemperature();
+  if (isnan(temperature)) temperature = 0.0;
+  if (isnan(temperature) || isinf (temperature)) temperature = 0.0;
+
   //float sens
   int floatstate = digitalRead(FLOAT_PIN);
 
-  //voltage calculations for Ec
-  int tdsRaw = analogRead(TDS_PIN);
-  float tdsVoltage = tdsRaw * (3.3 / 4095.0); //ESP32 is 3.3v and the max range is 4095
-  float tempCoefficient = 1.0 + 0.02 * (waterTemp - 25.0); //from manufacturer's website 
-  //from gravity TDS sensor documentation, rawEc = rawEC / tempCoefficient 
-  float rawEc = (133.42 * pow(tdsVoltage, 3)) - (255.86 * pow(tdsVoltage, 2)) + (857.39 * tdsVoltage);
-  rawEc = rawEc / tempCoefficient;  //fmax(a,b) returns larger of a and b. floating point of max(()). we put 0 to avoid negative readings!
-  float calibratedEc = fmax(ecSlope * rawEc + ecoffset, 0);
+  //median filter loop
+  phBuffer[phBufferIndex++] = analogRead(PH_PIN);
+  if (phBufferIndex >= SCOUNT) phBufferIndex = 0; 
 
-  //voltage calculations for pH
-  int phRaw = analogRead(PH_PIN);
-  float phVoltage = phRaw * (3.3 / 4095);
-  //float clampedVoltage = constrain(phVoltage, voltageLow, voltageHigh);
-  //float ph = phSlope * clampedVoltage + phIntercept;
-  float ph = exp((phVoltage - 0.322) / 0.742);
+  tdsBuffer[tdsBufferIndex++] = analogRead(TDS_PIN);
+  if (tdsBufferIndex >= SCOUNT) tdsBufferIndex = 0; 
 
-//calibrtion prints, can remove when done or comment out i guess
-  Serial.print("TDS Raw in ppm: "); Serial.print(tdsRaw);
-  Serial.print("TDS Voltage: "); Serial.print(tdsVoltage, 4);
-  Serial.print("EC Raw: "); Serial.print(rawEc, 2);
-  Serial.print("Calibrated Ec: "); Serial.println(calibratedEc, 2);
+  static unsigned long lastMedianCalc = 0;
+  if (millis() - lastMedianCalc > 800) {
+    lastMedianCalc = millis();
 
-  Serial.print("pH raw: "); Serial.print(phRaw);
-  Serial.print("ph voltage: "); Serial.print(phVoltage, 4);
-  Serial.print("final ph: "); Serial.println(ph, 2);
+    // Copy buffers for sorting
+    memcpy(phBufferTemp, phBuffer, sizeof(phBuffer));
+    memcpy(tdsBufferTemp, tdsBuffer, sizeof(tdsBuffer));
 
-  //live sensor reads publish payloads 
-  String payload = "{";
-  payload += "\"room_temp\":" + String(t) + ",";
-  payload += "\"humidity\":" + String(h) + ",";
-  payload += "\"water_temp\":" + String(waterTemp) + ",";
-  ///one decimal place?
-  payload += "\"ec\":" + String(calibratedEc, 1) + ",";
-  ///two decimal place?
-  payload += "\"ph\":" + String(ph, 2) + ",";
-  payload += "\"low_water\":" + String(floatstate == LOW ? 1 : 0);
-  payload += "}";
-  client.publish("sensors/all", payload.c_str());
+    // Get median ADC readings
+    int phMedianRaw = getMedian(phBufferTemp, SCOUNT);
+    int tdsMedianRaw = getMedian(tdsBufferTemp, SCOUNT);
 
-  // erros config
-  if (h >= toohumid) client.publish("alerts/humidity", "Room is too humid!");
-  if (h <= toodry) client.publish("alerts/humidity", "Room is too humid!");
-  if (t >= highroomtemp) client.publish("alerts/room_temp", "Room is too hot!");
-  if (t <= lowroomtemp) client.publish("alerts/room_temp", "Room is too cold!");
-  if (waterTemp <= lowwatertemp) client.publish("alerts/water_temp", "Reservoir is too cold!");
-  if (waterTemp >= highwatertemp) client.publish("alerts/water_temp", "Reservoir is too hot!");
-  if (floatstate == LOW) client.publish("alerts/water_level", "Water level is LOW!");
+    // Convert median ADC to voltage
+    float phVoltage = phMedianRaw * (3.3 / 4095.0);
+    float tdsVoltage = tdsMedianRaw * (3.3 / 4095.0);
 
-  //pump, use gpio directly 
-  if (calibratedEc < tdslow){
-    digitalWrite(25, HIGH);
-    digitalWrite(26, LOW);
-    client.publish("alerts/pump", "Nutrients too low, pump on");
-  }else{
-    digitalWrite(25, LOW);
-    digitalWrite(26, LOW);
+    float ph = (phVoltage - 1.65) / -0.059 + 7.0;
+    if (isnan(ph) || isinf (ph)) ph = 0.0;
+
+    
+
+    float calibratedtds = 0.0;
+    if (tdsMedianRaw < 10 || tdsMedianRaw > 4000) {
+      // Treat as invalid / sensor in air
+      calibratedtds = 0.0;
+    } else {
+      calibratedtds = tdsVoltage * (1000.0 / 2.3); //from DQrobot's page, it's not 3.3!
+    }
+    if (isnan(calibratedtds) || isinf (calibratedtds)) calibratedtds = 0.0;
+
+    //live sensor reads publish payloads 
+    String payload = "{";
+    payload += "\"room_temp\":" + String(temperature) + ",";
+    payload += "\"humidity\":" + String(humidity) + ",";
+    payload += "\"water_temp\":" + String(waterTemp) + ",";
+    payload += "\"tds\":" + String(calibratedtds, 1) + ",";
+    payload += "\"ph\":" + String(ph, 2) + ",";
+    payload += "\"low_water\":" + String(floatstate == LOW ? 1 : 0);
+    payload += "}";
+    client.publish("sensors/all", payload.c_str(), true);
+    Serial.println(payload);
+
+
+  Serial.print("TDS Voltage: "); Serial.println(tdsVoltage, 2);
+  Serial.print("pH Voltage: "); Serial.println(phVoltage, 2);
+
+    //pump, use gpio directly, add max time for 3 mins, off for 1, back on if needed
+
+    unsigned long currenttime = millis();
+
+    if (calibratedtds >= 1000 && calibratedtds < tdslow) {
+      if (!pumprunning) {
+        digitalWrite(25, HIGH);
+        digitalWrite(26, LOW);
+        pumpstarttime = currenttime;
+        pumprunning = true; 
+      } else if (currenttime - pumpstarttime >= maxpumptime) {
+        digitalWrite(25, LOW);
+        digitalWrite(26, LOW);
+        pumprunning = false;
+      }
+    } else {
+      if (pumprunning){
+        digitalWrite(25, LOW);
+        digitalWrite(26, LOW);
+        pumprunning = false;
+      } else {
+        digitalWrite(25, LOW);
+        digitalWrite(26, LOW);
+      }
+    }
   }
-  
-  // prints, for serial monnitor - prototype only 
-  Serial.println(payload);
+  // prints, for serial monitor - prototype only 
+  Serial.println();
   delay(5000);
+}
+
+int getMedian(int arr[], int len) {
+  // Simple bubble sort for median filtering from CQrobot wikipedia
+  for (int i = 0; i < len - 1; i++) {
+    for (int j = 0; j < len - i - 1; j++) {
+      if (arr[j] > arr[j + 1]) {
+        int temp = arr[j];
+        arr[j] = arr[j + 1];
+        arr[j + 1] = temp;
+      }
+    }
+  }
+  return arr[len / 2];  // middle value after sorting
 }
